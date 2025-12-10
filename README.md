@@ -1,268 +1,266 @@
-# 🎉 cslog —— 高性能 C++ JSON 日志库
+# cslog
 
-**cslog** 是一个轻量级、高性能、线程安全的 C++ 日志库，具备：
+本模块提供一个 **高性能、线程安全、异步写入** 的 C++ 日志系统，实现：
 
-- 🚀 **异步写入（后台线程）**
-- 📄 **单行 JSON 格式日志**
-- 🧠 **智能 flush（性能 × 安全）**
-- 📦 **单文件大小滚动**
-- 🗑 **日志总大小上限自动清理**
-- 🎨 **彩色控制台输出（可选）**
-- ⚙ **YAML 配置驱动**
-- 🔧 **构造即初始化（无启动输出）**
+* 异步写入（后台线程 + 队列）
+* 单行 JSON 格式日志，便于机器解析
+* 单文件大小回滚 + 日志总大小上限控制
+* 智能 flush：按字节、按时间、按 ERROR 级别触发
+* 彩色控制台输出（可选）
 
-适用于嵌入式设备、网络服务、后台守护进程、高并发程序等需要稳定日志系统的场景。
+---
 
-------
+## ✨ 特性
 
-# ✨ 功能特性
+* **结构化日志**：每行都是完整 JSON，方便 ELK / Loki / jq / Python 分析
+* **异步 + 低锁竞争**：业务线程只负责入队，真正 I/O 在后台线程执行
+* **多重限流**：
 
-## 🔹 1. 异步 & 多线程安全
+  * 单文件大小上限（`maxFileSize`）自动滚动新文件
+  * 所有日志文件总大小（`maxLogsTotalSize`）自动删除最旧日志
+* **智能 flush 策略**：兼顾性能和崩溃场景下的日志安全
+* **可配置**：通过 `config.yaml` 控制输出等级、输出位置、队列策略等
 
-日志写入通过独立线程异步处理，不阻塞主线程。
+---
 
-支持队列策略：
+## 🔧 对外主要接口（宏 + Logger 单例）
 
-- `block`   —— 队列满时阻塞
-- `drop`    —— 直接丢弃
-- `warn`    —— 控制台警告并丢弃
+一般只需要用日志宏，不直接操作 `Logger`：
 
-------
+```cpp
+// 常规日志（不带源信息）
+LOG_ERROR   << "错误信息";
+LOG_WARN    << "警告信息";
+LOG_INFO    << "普通信息";
+LOG_DEBUG   << "调试信息";
 
-## 🔹 2. JSON 格式日志（1行 = 1条完整 JSON）
+// 带文件名 / 行号 / 函数名
+LOG_ERROR_F << "严重错误，code=" << code;
+LOG_INFO_F  << "启动模块: " << moduleName;
+```
 
-适用于：
+`Logger` 自身是单例：
 
-- ELK / Loki / Splunk
-- FluentBit / Promtail
-- Python/pandas 分析
-- `jq` 命令行处理
+```cpp
+csLog::Logger& log = csLog::Logger::instance();
 
-示例：
+// 不建议在业务逻辑中直接调用，但可以在退出时主动 stop
+log.stop();
+```
 
-```json
+> 注意：
+>
+> * 第一次使用 `LOG_XXX` 会触发 `Logger::instance()` 构造，**自动加载 YAML 配置并启动后台线程**。
+> * 无需手动初始化。
+
+---
+
+## 🚀 快速上手
+
+```cpp
+#include "cslog/csLog.h"
+
+int main()
 {
-  "time": "2025-12-10 17:45:26",
-  "level": "INFO",
-  "file": "main.cpp",
-  "line": 12,
-  "func": "initModule",
-  "msg": "module initialized"
+    LOG_INFO << "程序启动";
+    LOG_DEBUG << "调试信息";
+    LOG_ERROR_F << "模块初始化失败, code=" << -1;
+
+    // 程序结束前不需要显式 flush，Logger 析构时会自动 stop + flush
+    return 0;
 }
 ```
 
-------
+日志文件（JSON，每行一条）示例：
 
-## 🔹 3. 智能 Flush（保证性能又避免丢日志）
-
-为保证性能与安全性平衡，cslog 内置三层 flush 策略：
-
-| 场景       | Flush 行为                               |
-| ---------- | ---------------------------------------- |
-| ERROR 级别 | **立刻 flush**（尽量避免崩溃丢关键日志） |
-| 普通日志   | 每累计 `32KB` flush 一次                 |
-| 周期检查   | 每 `1 秒` flush 一次                     |
-
-程序正常退出时还会进行最后一次 flush。
-
-------
-
-## 🔹 4. 单文件大小滚动（maxFileSize）
-
-当单个 `.log` 文件达到上限：
-
-```
-./logs/myApp_2025-12-10_17-00-01.log
+```json
+{"time":"2025-12-10 18:00:01","level":"INFO","msg":"程序启动"}
+{"time":"2025-12-10 18:00:01","level":"ERROR","file":"main.cpp","line":12,"func":"main","msg":"模块初始化失败, code=-1"}
 ```
 
-自动创建新文件：
+---
 
-```
-./logs/myApp_2025-12-10_17-05-32.log
-```
-
-------
-
-## 🔹 5. 总大小限制（maxLogsTotalSize）
-
-当日志目录中所有 `baseName_*.log` 文件的大小总和超过上限时：
-
-- 自动按时间从旧到新排序
-- 删除最旧文件
-- 直到总大小 ≤ 上限
-
-保证磁盘不会被耗尽。
-
-------
-
-## 🔹 6. 彩色控制台输出
-
-| Level | 颜色 |
-| ----- | ---- |
-| ERROR | 红色 |
-| WARN  | 黄色 |
-| INFO  | 青色 |
-| DEBUG | 灰色 |
-
-可通过配置关闭：
-
-```yaml
-toConsole: false
-```
-
-------
-
-# 📦 安装与集成
-
-## 1. 使用 git submodule（推荐）
-
-```bash
-git submodule add https://github.com/yourname/cslog.git external/cslog
-```
-
-在你的项目 CMakeLists.txt 中加入：
-
-```cmake
-add_subdirectory(external/cslog)
-target_link_libraries(your_app PRIVATE cslog)
-```
-
-------
-
-## 2. 系统安装（支持 find_package）
-
-```bash
-cmake -B build
-cmake --build build
-sudo cmake --install build
-```
-
-安装后可直接使用：
-
-```cmake
-find_package(cslog REQUIRED)
-target_link_libraries(your_app PRIVATE cslog::cslog)
-```
-
-------
-
-# ⚙ 配置文件（YAML）
-
-在 `config/config.yaml` 中：
+## ⚙ 配置文件（config.yaml）
 
 ```yaml
 csLog:
   enable: true
   level: DEBUG              # ERROR / WARN / INFO / DEBUG
-  toConsole: true
-  toFile: true
+  toConsole: true           # 是否输出到控制台（彩色）
+  toFile: true              # 是否输出到文件
 
   logPath: "./logs/"
-  fileName: "myApp"
+  fileName: "CS-Y2526-03-client"
 
-  maxFileSize: 5242880       # 单文件大小上限 5MB
-  maxLogsTotalSize: 52428800 # 所有日志总大小上限 50MB
+  maxFileSize: 5242880       # 单文件最大 5MB
+  maxLogsTotalSize: 52428800 # 所有 .log 总大小 50MB，超过会删最旧
 
   maxQueueSize: 20000
   queuePolicy: "block"       # block / drop / warn
 ```
 
-------
+---
 
-# 🧩 使用示例
+## 🧠 内部架构概览
 
-## 示例 1：基础日志
+### 日志数据流
+
+1. 业务代码调用 `LOG_INFO << "xxx"`
+2. 生成 `LogLine` 对象，累积内容到 `std::ostringstream`
+3. `LogLine` 在析构时：
+
+   * 获取当前时间
+   * 拼出一行 JSON 字符串
+   * 调用 `Logger::instance().push(level, jsonLine)` 入队
+4. 后台线程 `workerThread()` 从队列中取日志：
+
+   * 按等级着色输出到控制台（可选）
+   * 追加写入当前日志文件
+   * 根据策略进行 flush / 滚动 / 删除旧文件
+
+---
+
+## 🧵 线程模型 & 队列策略
+
+### 线程模型
+
+* **生产者**：业务线程（任意线程）调用 `LOG_XXX`
+* **消费者**：一个独立的后台线程 `workerThread()`
+
+优点：
+
+* 文件 I/O 只在一个线程中进行，保证顺序、不需要文件级别锁
+* 业务线程只做字符串拼接和入队，开销小
+
+### 队列与策略
+
+内部使用：
 
 ```cpp
-#include "cslog/csLog.h"
-
-int main() {
-    LOG_INFO << "程序启动";
-    LOG_DEBUG << "调试信息";
-    LOG_WARN  << "低电量警告";
-    LOG_ERROR << "严重错误！";
-
-    return 0;
-}
+std::queue<LogTask> queue;
+std::mutex          mtx;
+std::condition_variable cv;
 ```
 
-## 示例 2：带文件/行号/函数
+当队列长度达到 `maxQueueSize` 时：
+
+* `queuePolicy = "block"`
+
+  * 生产者在 `push()` 中阻塞等待队列变小 → 不丢日志，可能卡主
+* `queuePolicy = "drop"`
+
+  * 直接丢弃本条日志 → 不阻塞，可能丢日志
+* `queuePolicy = "warn"`
+
+  * 打印黄色警告（stderr），然后丢弃本条日志
+
+---
+
+## 💾 文件写入 & Flush 策略
+
+后台线程在处理每条日志时：
+
+1. 如果 `toConsole = true` → 带颜色输出到 `std::cout`，立即 flush
+2. 如果 `toFile = true`：
+
+   * 调用 `openFileOnce()` 确保当前日志文件已打开
+   * 写入这条 JSON 行
+   * 增加 `currentSize` & `bytesSinceFlush`
+   * 调用 `rotate()` 判断是否需要按单文件大小进行滚动
+
+此外，线程每次循环会检查是否需要 flush：
+
+* **立即 flush 场景**：
+
+  * 日志等级为 `ERROR`（`LOG_ERROR / LOG_ERROR_F`）
+* **批量 flush 场景**：
+
+  * `bytesSinceFlush >= 32KB`
+  * 距离上次 flush 超过 1 秒
+
+> 这样可以在：
+>
+> * 高频日志场景下减少 flush 次数（提高性能）
+> * 低频日志场景下保证日志尽快落盘（延迟最长约 1 秒）
+> * ERROR 场景下尽可能不丢关键出错日志。
+
+---
+
+## 📂 文件回滚与磁盘占用控制
+
+### 1. 单日志文件大小回滚（maxFileSize）
+
+当当前文件大小 `currentSize >= maxFileSize` 时：
+
+1. flush + close 当前文件
+2. 触发 `cleanupOldLogFiles()`（按总大小删最旧）
+3. 调用 `createNewLogFile()` 创建一个新的时间戳文件：
+
+```text
+CS-Y2526-03-client_2025-12-10_17-45-26.log
+```
+
+### 2. 所有日志文件总大小限制（maxLogsTotalSize）
+
+`cleanupOldLogFiles()` 会：
+
+1. 遍历 `logPath` 下所有满足 `{fileName}_*.log` 的文件
+2. 统计总大小
+3. 若总大小 > `maxLogsTotalSize`：
+
+   * 按 `last_write_time` 升序排序
+   * 从最旧的文件开始依次 `remove()`
+   * 直到总大小 <= 上限
+
+> 确保日志不会无限占用磁盘空间，尤其适合嵌入式和长期运行服务。
+
+---
+
+## 🔍 日志等级与过滤
+
+枚举定义：
 
 ```cpp
-LOG_ERROR_F << "模块初始化失败";
+enum LogLevel {
+    LOG_LEVEL_OFF   = -1,
+    LOG_LEVEL_ERROR = 0,
+    LOG_LEVEL_WARN,
+    LOG_LEVEL_INFO,
+    LOG_LEVEL_DEBUG
+};
 ```
 
-输出：
+当配置为：
 
-```json
-{"time":"2025-12-10 17:20:30","level":"ERROR","file":"main.cpp","line":72,"func":"init","msg":"模块初始化失败"}
+```yaml
+level: INFO
 ```
 
-------
+则：
 
-# 📁 目录结构
+* ✅ 输出：ERROR / WARN / INFO
+* ❌ 不输出：DEBUG
 
-```
-cslog/
-│
-├── CMakeLists.txt
-├── LICENSE
-├── README.md
-├── CHANGELOG.md
-├── logo.svg
-│
-├── include/
-│   └── cslog/
-│       ├── csLog.h
-│       └── version.h
-│
-├── src/
-│   └── csLog.cpp
-│
-├── config/
-│   └── config.yaml.example
-│
-└── examples/
-    ├── CMakeLists.txt
-    └── basic/
-        └── main.cpp
+过滤逻辑在 `LogLine::~LogLine()` 和 `Logger::push()` 中统一判断：
+
+```cpp
+if (!config().enable || level > config().level)
+    return;
 ```
 
-------
+---
 
-# 🧪 示例工程运行
+## ✅ 小结
 
-```bash
-cmake -B build -DCSLOG_BUILD_EXAMPLES=ON
-cmake --build build
-./build/examples/cslog_example_basic
-```
+* **对外 API 简单**：只用 `LOG_XXX` 宏就能完成绝大多数需求
+* **内部架构清晰**：
 
-------
+  * RAII 构造 JSON 行
+  * 单例 Logger 管理线程和资源
+  * 单消费线程 I/O，队列 + 条件变量做桥接
+* **可靠性**：
 
-# 📜 错误与崩溃安全
-
-- `ERROR` 日志立即 flush，最大化保存错误信息
-- 普通日志有缓冲，但最大损失量通常 ≤ 32KB 或 ≤ 1s
-- 正常退出一定完整落盘
-
-------
-
-# 📄 许可证
-
-本项目使用 **MIT License**，完全可免费商用。
-
-------
-
-# 🤝 贡献
-
-欢迎提交 Issue 或 PR，如果你有更多想法：
-
-- 按天日志滚动
-- 模块化 logger
-- 压缩日志（zstd/lz4）
-- 输出到 syslog/journald
-- 网络日志（TCP/UDP）
-
-都可以一起讨论与扩展！
+  * ERROR 级别立刻 flush
+  * 批量 flush 降低性能损耗
+  * 单文件大小 + 总大小双重控制磁盘占用
 
