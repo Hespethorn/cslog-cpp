@@ -1,0 +1,14 @@
+csLog:
+  enable: true
+  level: DEBUG              # ERROR / WARN / INFO / DEBUG
+  toConsole: true
+  toFile: true
+
+  logPath: "./logs/"
+  fileName: "cslog-demo"
+
+  maxFileSize: 5242880       # 单文件大小上限 5MB
+  maxLogsTotalSize: 52428800 # 所有 .log 总大小上限 50MB
+
+  maxQueueSize: 20000
+  queuePolicy: "block"       # block / drop / warn
